@@ -4,5 +4,5 @@ torch
 torchvision
 faiss-cpu
 Pillow
-requests
+girequests
 woocommerce
