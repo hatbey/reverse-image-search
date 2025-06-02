@@ -6,4 +6,3 @@ faiss-cpu
 Pillow
 woocommerce
 pymysql
-    
