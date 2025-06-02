@@ -5,3 +5,5 @@ torchvision
 faiss-cpu
 Pillow
 woocommerce
+pymysql
+    
