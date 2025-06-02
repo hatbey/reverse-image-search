@@ -1,95 +1,92 @@
 # app/woo_sync.py
 
-from woocommerce import API
-import requests
 import os
-from PIL import Image
-from io import BytesIO
 import json
+import requests
 import numpy as np
+from io import BytesIO
+from PIL import Image
+from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
+from tensorflow.keras.preprocessing import image
 import faiss
-from .model import extract_embedding
 
-# WooCommerce API credentials (replace with your actual keys)
-wcapi = API(
-    url="https://puranpradhan.com.np/puran",  # <-- 🔁 REPLACE with your WooCommerce site URL
-    consumer_key="ck_8b64c34586f05eedbb98657392053f171703ad60",  # <-- 🔁 YOUR API key
-    consumer_secret="cs_4e073dfa5cb005d0872593af917788b2904177b9",  # <-- 🔁 YOUR API secret
-    version="wc/v3"
-)
-
-# File paths
-IMAGE_DIR = "app/images"
+# Constants
+WOO_API_URL = os.getenv("https://puranpradhan.com.np/puran")
+WOO_CONSUMER_KEY = os.getenv("ck_8b64c34586f05eedbb98657392053f171703ad60")
+WOO_CONSUMER_SECRET = os.getenv("cs_4e073dfa5cb005d0872593af917788b2904177b9")
+DATA_PATH = "app/product_data.json"
 INDEX_PATH = "app/faiss_index.faiss"
-METADATA_PATH = "app/product_data.json"
+INDEX_DIM = 2048
 
-os.makedirs(IMAGE_DIR, exist_ok=True)
+model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
 
-def fetch_products():
-    print("Fetching WooCommerce products...")
-    products = []
+def get_products():
+    print("🔄 Fetching products from WooCommerce...")
     page = 1
-
+    all_products = []
     while True:
-        response = wcapi.get("products", params={"per_page": 100, "page": page})
-        data = response.json()
-        if not data:
+        res = requests.get(
+            f"{WOO_API_URL}/wp-json/wc/v3/products",
+            auth=(WOO_CONSUMER_KEY, WOO_CONSUMER_SECRET),
+            params={"per_page": 100, "page": page}
+        )
+        if res.status_code != 200:
+            raise Exception("❌ Failed to fetch products:", res.text)
+        products = res.json()
+        if not products:
             break
-        products.extend(data)
+        all_products.extend(products)
         page += 1
+    print(f"✅ Retrieved {len(all_products)} products.")
+    return all_products
 
-    print(f"Fetched {len(products)} products.")
-    return products
+def embed_image_url(img_url):
+    try:
+        res = requests.get(img_url, timeout=10)
+        img = Image.open(BytesIO(res.content)).convert("RGB")
+        img = img.resize((224, 224))
+        x = image.img_to_array(img)
+        x = np.expand_dims(x, axis=0)
+        x = preprocess_input(x)
+        features = model.predict(x)
+        return features[0]
+    except Exception as e:
+        print(f"⚠️ Error processing image: {e}")
+        return None
 
-def download_image(url, filename):
-    response = requests.get(url, timeout=10)
-    img = Image.open(BytesIO(response.content)).convert("RGB")
-    save_path = os.path.join(IMAGE_DIR, filename)
-    img.save(save_path)
-    return img
-
-def build_index_from_woocommerce():
-    products = fetch_products()
-
-    embeddings = []
+def build_index(products):
+    print("⚙️ Building FAISS index...")
+    index = faiss.IndexFlatL2(INDEX_DIM)
     metadata = []
 
     for product in products:
-        if not product.get("images"):
-            continue  # skip products without images
-
-        img_url = product["images"][0]["src"]
-        filename = f"{product['id']}.jpg"
-
-        try:
-            print(f"Processing product {product['id']} - {product['name']}")
-            img = download_image(img_url, filename)
-            vec = extract_embedding(img)
-            embeddings.append(vec)
-            metadata.append({
-                "id": product["id"],
-                "name": product["name"],
-                "filename": filename,
-                "permalink": product["permalink"]
-            })
-
-        except Exception as e:
-            print(f"❌ Failed to process {product['id']}: {e}")
+        img_url = product.get("images", [{}])[0].get("src")
+        if not img_url:
             continue
 
-    # Save metadata
-    with open(METADATA_PATH, "w") as f:
+        vec = embed_image_url(img_url)
+        if vec is None:
+            continue
+
+        index.add(np.array([vec]).astype('float32'))
+        metadata.append({
+            "id": product["id"],
+            "name": product["name"],
+            "permalink": product["permalink"],
+            "image": img_url
+        })
+
+        print(f"✅ Embedded product: {product['name']}")
+
+    faiss.write_index(index, INDEX_PATH)
+    with open(DATA_PATH, 'w') as f:
         json.dump(metadata, f)
 
-    # Create FAISS index
-    if embeddings:
-        vecs = np.array(embeddings).astype("float32")
-        index = faiss.IndexFlatL2(vecs.shape[1])
-        index.add(vecs)
-        faiss.write_index(index, INDEX_PATH)
-        print(f"✅ Built FAISS index with {len(embeddings)} products.")
-    else:
-        print("⚠️ No embeddings generated.")
+    print(f"✅ Index saved with {index.ntotal} items.")
+
+def run():
+    products = get_products()
+    build_index(products)
 
 if __name__ == "__main__":
-    build_index_from_woocommerce()
+    run()
